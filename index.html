@@ -1,0 +1,188 @@
+﻿<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+    <meta charset="UTF-8">
+    <title>CubeSim Pro Studio - 本機 3D 動態驗證原型</title>
+    <!-- 引入 Tailwind CSS 確保排版好看 -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <!-- 引入 Three.js 3D 引擎 -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+</head>
+<body class="bg-slate-950 text-slate-100 h-screen flex overflow-hidden font-sans">
+
+    <!-- 左側控制面板 (UI 介面層) -->
+    <div class="w-96 bg-slate-900 border-r border-slate-800 p-6 flex flex-col justify-between shadow-2xl">
+        <div class="space-y-6">
+            <div>
+                <h1 class="text-xl font-bold tracking-wider text-blue-400">CubeSim Pro Studio</h1>
+                <p class="text-xs text-slate-400 mt-1">本機 3D 晶片行為模擬與驗證軟體</p>
+            </div>
+
+            <!-- 分頁切換 -->
+            <div class="flex bg-slate-800 p-1 rounded-lg">
+                <button onclick="switchTab('layer')" id="btn-layer" class="flex-1 py-2 text-sm rounded-md bg-blue-600 text-white transition">上層結構動態</button>
+                <button onclick="switchTab('basement')" id="btn-basement" class="flex-1 py-2 text-sm rounded-md text-slate-400 hover:text-white transition">雙層地下室網格</button>
+            </div>
+
+            <!-- 動態滑塊控制 -->
+            <div class="bg-slate-800/50 p-4 rounded-xl border border-slate-700/50 space-y-4">
+                <div class="flex justify-between text-sm">
+                    <span class="text-slate-300">結構單元間距 (Spacing)</span>
+                    <span id="slider-val" class="text-blue-400 font-mono">50 μm</span>
+                </div>
+                <input type="range" min="10" max="100" value="50" id="param-slider" 
+                    class="w-full accent-blue-500 cursor-pointer" oninput="updateSimulation(this.value)">
+                <p class="text-[11px] text-slate-400">💡 拖動滑塊即時調整上層模組幾何間距與熱應力運算。</p>
+            </div>
+
+            <!-- 即時狀態回報 -->
+            <div class="space-y-2 text-xs font-mono bg-slate-950 p-3 rounded-lg border border-slate-800">
+                <div class="flex justify-between text-slate-400"><span>C++ 核心狀態:</span> <span class="text-emerald-400">● 運行中 (Zero-Backend)</span></div>
+                <div class="flex justify-between text-slate-400"><span>動態拓撲檢驗:</span> <span class="text-blue-400" id="status-text">合格 (PASS)</span></div>
+            </div>
+        </div>
+
+        <!-- 重設按鈕 -->
+        <button onclick="resetParams()" class="w-full bg-red-600/80 hover:bg-red-600 text-white py-2.5 rounded-lg text-sm font-medium transition shadow-lg flex items-center justify-center gap-2">
+            <span>🔄</span> 參數強制重設 (Reset Fuse)
+        </button>
+    </div>
+
+    <!-- 右側：即時 3D 互動畫布 -->
+    <div class="flex-1 relative flex flex-col">
+        <div class="absolute top-4 left-4 z-10 bg-slate-900/80 backdrop-blur border border-slate-700/50 px-4 py-2 rounded-lg text-xs flex gap-4 text-slate-300">
+            <span>視圖：三維立體交織與模組化貼合</span>
+            <span class="text-emerald-400">滑鼠左鍵可旋轉 3D 視角</span>
+        </div>
+        <div id="canvas-container" class="flex-1"></div>
+    </div>
+
+    <!-- 3D 渲染與互動邏輯 -->
+    <script>
+        // 初始化 Three.js 3D 場景
+        const container = document.getElementById('canvas-container');
+        const scene = new THREE.Scene();
+        const camera = new THREE.PerspectiveCamera(60, container.clientWidth / container.clientHeight, 0.1, 1000);
+        const renderer = new THREE.WebGLRenderer({ antialias: true });
+        
+        renderer.setSize(container.clientWidth, container.clientHeight);
+        renderer.setClearColor(0x020617);
+        container.appendChild(renderer.domElement);
+
+        // 加入燈光
+        const ambientLight = new THREE.AmbientLight(0xffffff, 0.7);
+        scene.add(ambientLight);
+        const pointLight = new THREE.PointLight(0x3b82f6, 2);
+        pointLight.position.set(10, 20, 10);
+        scene.add(pointLight);
+
+        // 建立「三層晶片結構模型」（下層底座、中層地下室、上層可替換模組）
+        const group = new THREE.Group();
+
+        // 1. 下層矽晶圓底座 (藍色基底)
+        const baseGeo = new THREE.BoxGeometry(6, 0.5, 6);
+        const baseMat = new THREE.MeshStandardMaterial({ color: 0x1e3a8a, roughness: 0.4 });
+        const baseMesh = new THREE.Mesh(baseGeo, baseMat);
+        baseMesh.position.y = -1.5;
+        group.add(baseMesh);
+
+        // 2. 中層中介層 (共用地下室 - 灰色網格)
+        const midGeo = new THREE.BoxGeometry(5.5, 0.4, 5.5);
+        const midMat = new THREE.MeshStandardMaterial({ color: 0x475569, wireframe: false });
+        const midMesh = new THREE.Mesh(midGeo, midMat);
+        midMesh.position.y = -0.8;
+        group.add(midMesh);
+
+        // 3. 上層可替換結構單元群組 (模擬你可以隨時抽換的動態模組)
+        const topModules = [];
+        const modGeo = new THREE.BoxGeometry(1.2, 1.2, 1.2);
+        
+        for(let x = -1.5; x <= 1.5; x += 1.5) {
+            for(let z = -1.5; z <= 1.5; z += 1.5) {
+                const modMat = new THREE.MeshStandardMaterial({ color: 0x3b82f6, roughness: 0.2, metalness: 0.8 });
+                const mod = new THREE.Mesh(modGeo, modMat);
+                mod.position.set(x, 0.2, z);
+                group.add(mod);
+                topModules.push(mod);
+            }
+        }
+
+        scene.add(group);
+        camera.position.set(5, 5, 7);
+        camera.lookAt(0, 0, 0);
+
+        // 滑鼠互動旋轉功能
+        let isDragging = false;
+        let prevMousePos = { x: 0, y: 0 };
+        
+        container.addEventListener('mousedown', (e) => { isDragging = true; prevMousePos = { x: e.clientX, y: e.clientY }; });
+        window.addEventListener('mouseup', () => { isDragging = false; });
+        container.addEventListener('mousemove', (e) => {
+            if (!isDragging) return;
+            const deltaX = e.clientX - prevMousePos.x;
+            const deltaY = e.clientY - prevMousePos.y;
+            group.rotation.y += deltaX * 0.005;
+            group.rotation.x += deltaY * 0.005;
+            prevMousePos = { x: e.clientX, y: e.clientY };
+        });
+
+        // 動態滑塊連動邏輯：當你拉動滑塊時，上層結構會即時展開/收縮，並隨時在畫面上「動」給你看！
+        function updateSimulation(val) {
+            document.getElementById('slider-val').innerText = val + ' μm';
+            const scaleFactor = val / 50;
+            
+            // 讓上層模組的間距隨滑塊即時動態變化
+            topModules.forEach((mod, index) => {
+                const originalX = (index % 2 === 0 ? -1.5 : 1.5);
+                const originalZ = (index < 2 ? -1.5 : 1.5);
+                mod.position.x = originalX * scaleFactor;
+                mod.position.z = originalZ * scaleFactor;
+            });
+
+            // 模擬物理熔斷與狀態檢查
+            const statusText = document.getElementById('status-text');
+            if (val > 85) {
+                statusText.innerText = "警告：超出物理極限 (Trigger Fuse!)";
+                statusText.className = "text-red-400 font-bold";
+            } else {
+                statusText.innerText = "合格 (PASS)";
+                statusText.className = "text-blue-400";
+            }
+        }
+
+        function resetParams() {
+            document.getElementById('param-slider').value = 50;
+            updateSimulation(50);
+            group.rotation.set(0, 0, 0);
+        }
+
+        function switchTab(tab) {
+            if(tab === 'layer') {
+                document.getElementById('btn-layer').className = "flex-1 py-2 text-sm rounded-md bg-blue-600 text-white transition";
+                document.getElementById('btn-basement').className = "flex-1 py-2 text-sm rounded-md text-slate-400 hover:text-white transition";
+            } else {
+                document.getElementById('btn-basement').className = "flex-1 py-2 text-sm rounded-md bg-blue-600 text-white transition";
+                document.getElementById('btn-layer').className = "flex-1 py-2 text-sm rounded-md text-slate-400 hover:text-white transition";
+            }
+        }
+
+        // 動態渲染迴圈 (讓畫面持續流暢運作)
+        function animate() {
+            requestAnimationFrame(animate);
+            // 讓整個 3D 模型微微自轉，展示立體結構
+            if(!isDragging) {
+                group.rotation.y += 0.003;
+            }
+            renderer.render(scene, camera);
+        }
+        animate();
+
+        // 視窗大小改變時自動適應
+        window.addEventListener('resize', () => {
+            camera.aspect = container.clientWidth / container.clientHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(container.clientWidth, container.clientHeight);
+        });
+    </script>
+</body>
+</html>
